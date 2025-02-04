@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
 from sklearn.metrics import classification_report, f1_score, precision_score, recall_score
+import numpy as np
 
 class PLABA1bDataset:
     def __init__(self, data_dir):
@@ -47,33 +48,40 @@ class PLABA1bDataset:
             abstract_text = self.get_abstract_text(abstract_id)
             
             for term, info_list in terms.items():
-                # Get the action from the first item in the list
-                # Handle both cases where action might be a list or string
-                action = info_list[0] if info_list else 'keep'  # Default to 'keep' if empty list
-                if isinstance(action, list):
-                    action = action[0]  # Take first action if it's a list
+                # Convert all actions to a list format
+                actions = []
+                for item in info_list:
+                    if isinstance(item, list):
+                        actions.append(item[0])  # Get the action from each [action, explanation] pair
+                
+                if not actions:  # If no actions found
+                    continue  # Skip this example
+                    
                 examples.append({
                     'abstract_id': abstract_id,
                     'text': abstract_text,
                     'term': term,
-                    'action': action
+                    'actions': actions  # Now using 'actions' instead of 'action'
                 })
         
         return examples
     
     def get_test_examples(self):
-        """Create test examples."""
+        """Create test examples with actual labels."""
         examples = []
         
         for abstract_id, terms in self.test_data.items():
             abstract_text = self.get_abstract_text(abstract_id)
             
-            for term in terms.keys():
+            for term, action_list in terms.items():
+                # Extract just the action types (first element of each sublist)
+                actions = [action[0] for action in action_list]
+                
                 examples.append({
                     'abstract_id': abstract_id,
                     'text': abstract_text,
                     'term': term,
-                    'action': 'SUBSTITUTE'  # Changed from 'keep' to 'SUBSTITUTE' as default
+                    'actions': actions
                 })
         
         return examples
@@ -90,8 +98,6 @@ class JargonActionDataset(Dataset):
     
     def __getitem__(self, idx):
         example = self.examples[idx]
-        
-        # Prepare input text (abstract + jargon term)
         text = f"Abstract: {example['text']} Term: {example['term']}"
         
         # Tokenize
@@ -103,16 +109,19 @@ class JargonActionDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Get label
-        label_id = self.label2id[example['action']]
+        # Create multi-label vector (a term can have multiple valid actions)
+        label_vector = torch.zeros(len(self.label2id))
+        for action in example['actions']:
+            if action in self.label2id:  # Only use valid actions
+                label_vector[self.label2id[action]] = 1
         
         return {
             'input_ids': encoding['input_ids'].squeeze(),
             'attention_mask': encoding['attention_mask'].squeeze(),
-            'labels': torch.tensor(label_id)
+            'labels': label_vector
         }
 
-def train_model(model, train_dataloader, num_epochs=10, learning_rate=2e-5, warmup_steps=0.1, patience=5):
+def train_model(model, train_dataloader, num_epochs=1, learning_rate=2e-5, warmup_steps=0.1, patience=5):
     """Train the model with early stopping."""
     # Setup optimizer
     optimizer = AdamW(model.parameters(), lr=learning_rate)
@@ -219,23 +228,24 @@ def evaluate_model(model, test_dataloader, id2label):
             labels = batch['labels'].to(device)
             
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            preds = torch.argmax(outputs.logits, dim=1)
+            # For multi-label, use sigmoid and threshold
+            preds = (torch.sigmoid(outputs.logits) > 0.5).float()
             
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
-    # Convert numeric labels to string labels
-    pred_labels = [id2label[pred] for pred in all_preds]
-    true_labels = [id2label[label] for label in all_labels]
+    # Convert to numpy arrays for easier handling
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
     
     # Calculate metrics
     print("\nClassification Report:")
-    print(classification_report(true_labels, pred_labels))
+    print(classification_report(all_labels, all_preds, target_names=list(id2label.values())))
     
     return {
-        'f1_macro': f1_score(true_labels, pred_labels, average='macro'),
-        'precision_macro': precision_score(true_labels, pred_labels, average='macro'),
-        'recall_macro': recall_score(true_labels, pred_labels, average='macro')
+        'f1_macro': f1_score(all_labels, all_preds, average='macro'),
+        'precision_macro': precision_score(all_labels, all_preds, average='macro'),
+        'recall_macro': recall_score(all_labels, all_preds, average='macro')
     }
 
 def main():
@@ -252,6 +262,7 @@ def main():
     model = AutoModelForSequenceClassification.from_pretrained(
         'microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract',
         num_labels=len(dataset.action_labels),
+        problem_type="multi_label_classification",
         id2label=dataset.id2label,
         label2id=dataset.label2id
     )
