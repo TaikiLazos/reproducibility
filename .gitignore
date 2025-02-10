@@ -6,3 +6,5 @@ results/
 *.out
 models/
 job_file_results/
+__pycache__/
+*.py[cod]

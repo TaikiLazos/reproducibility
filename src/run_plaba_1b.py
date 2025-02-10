@@ -27,7 +27,7 @@ class PLABA1bDataset:
             self.test_data = json.load(f)
             
         # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained('microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract')
+        self.tokenizer = AutoTokenizer.from_pretrained('roberta-large')
         
         # Define correct action labels from the data
         self.action_labels = ['SUBSTITUTE', 'EXPLAIN', 'GENERALIZE', 'OMIT', 'EXEMPLIFY']
@@ -260,7 +260,7 @@ def main():
     
     # Initialize model
     model = AutoModelForSequenceClassification.from_pretrained(
-        'microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract',
+        'roberta-large',
         num_labels=len(dataset.action_labels),
         problem_type="multi_label_classification",
         id2label=dataset.id2label,
