@@ -33,12 +33,12 @@ Entity Level:
 | Large-size Models |  |  |  |
 | BERT | 87.9 | 86.5 | 85.5 |
 | RoBERTa | 91.3 | 89.0 | 82.7 |
-| BioBERT | ??? | ??? | ??? |
+| BioBERT | 88.9 | 84.3 | 0.0 |
 | PubMedBERT | 87.3 | 86.7 | 83.8 |
 | Base-size Models |  |  |  |
 | BERT | 87.3 | 83.1 | 82.3 |
 | RoBERTa | 89.0 | 85.7 | 83.4 |
-| BioBERT | ??? | ??? | ??? |
+| BioBERT | 88.5 | 85.6 | 85.0 |
 | PubMedBERT | 87.7 | 85.4 | 83.2 |
 
 Token Level:
@@ -47,12 +47,12 @@ Token Level:
 |--------|--------|--------|--------|
 | Large-size Models |  |  |  |
 | BERT | 88.7 | 87.9 | 79.1 |
-| RoBERTa | ??? | ??? | ??? |
+| RoBERTa | 90.8 | 89.0 | 85.1 |
 | BioBERT | 88.8 | 87.4 | 0.0 |
 | PubMedBERT | 87.1 | 85.4 | 81.7 |
 | Base-size Models |  |  |  |
 | BERT | 89.0 | 87.0 | 78.6 |
-| RoBERTa | ??? | ??? | ??? |
+| RoBERTa | 90.0 | 88.1 | 78.6 |
 | BioBERT | 90.2 | 88.2 | 85.3 |
 | PubMedBERT | 86.7 | 84.1 | 79.8 |
 
