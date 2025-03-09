@@ -137,7 +137,7 @@ def train(model, train_dataloader, val_dataloader, device, num_epochs=20):
         # Save best model
         if val_metrics['f1'] > best_f1:
             best_f1 = val_metrics['f1']
-            torch.save(model.state_dict(), 'output/jargon_model_finetuned.pt')
+            torch.save(model.state_dict(), 'output/jargon_model_finetuned_vanilla.pt')
             print("New best model saved!")
 
 def calculate_overlap(start1, end1, start2, end2):
@@ -175,48 +175,55 @@ def evaluate(model, dataloader, device):
             predictions = torch.argmax(outputs.logits, dim=2)
             labels = batch['labels']
             
-            # Convert predictions to spans
-            for pred, label, offsets in zip(predictions, labels, batch['offset_mapping']):
-                pred_spans = []  # List of (start, end) tuples
-                true_spans = []
+            # Process each sequence in batch
+            for pred_seq, label_seq, mask in zip(predictions, labels, batch['attention_mask']):
+                length = mask.sum().item()
+                pred_seq = pred_seq[:length].cpu().tolist()
+                label_seq = label_seq[:length].cpu().tolist()
                 
                 # Extract predicted spans
-                current_start = None
-                for idx, (p, (start, end)) in enumerate(zip(pred, offsets)):
-                    if p == 1 and current_start is None:
-                        current_start = start
-                    elif p == 0 and current_start is not None:
-                        pred_spans.append((current_start, end))
-                        current_start = None
+                pred_spans = []
+                start_idx = None
+                for idx, pred in enumerate(pred_seq):
+                    if pred == 1 and start_idx is None:  # Start of entity
+                        start_idx = idx
+                    elif (pred == 0 or idx == len(pred_seq) - 1) and start_idx is not None:  # End of entity
+                        end_idx = idx if pred == 0 else idx + 1
+                        pred_spans.append((start_idx, end_idx))
+                        start_idx = None
                 
                 # Extract true spans
-                current_start = None
-                for idx, (l, (start, end)) in enumerate(zip(label, offsets)):
-                    if l == 1 and current_start is None:
-                        current_start = start
-                    elif l == 0 and current_start is not None:
-                        true_spans.append((current_start, end))
-                        current_start = None
+                true_spans = []
+                start_idx = None
+                for idx, label in enumerate(label_seq):
+                    if label == 1 and start_idx is None:  # Start of entity
+                        start_idx = idx
+                    elif (label in [-100, 0] or idx == len(label_seq) - 1) and start_idx is not None:  # End of entity
+                        end_idx = idx if label in [-100, 0] else idx + 1
+                        true_spans.append((start_idx, end_idx))
+                        start_idx = None
                 
-                # Match spans with ≥75% overlap
-                matched_pred = set()
+                # Match spans using 75% overlap criterion
                 matched_true = set()
-                
-                for i, pred_span in enumerate(pred_spans):
-                    for j, true_span in enumerate(true_spans):
-                        if j not in matched_true:
-                            overlap = calculate_overlap(
-                                pred_span[0], pred_span[1],
-                                true_span[0], true_span[1]
-                            )
-                            if overlap >= 0.75:
-                                true_positives += 1
-                                matched_pred.add(i)
-                                matched_true.add(j)
-                                break
-                
-                # Count unmatched predictions as false positives
-                false_positives += len(pred_spans) - len(matched_pred)
+                for pred_span in pred_spans:
+                    found_match = False
+                    for i, true_span in enumerate(true_spans):
+                        if i not in matched_true:
+                            # Calculate overlap
+                            overlap_size = min(pred_span[1], true_span[1]) - max(pred_span[0], true_span[0])
+                            pred_size = pred_span[1] - pred_span[0]
+                            true_size = true_span[1] - true_span[0]
+                            
+                            if overlap_size > 0:
+                                overlap_ratio = overlap_size / max(pred_size, true_size)
+                                if overlap_ratio >= 0.75:  # 75% overlap threshold
+                                    true_positives += 1
+                                    matched_true.add(i)
+                                    found_match = True
+                                    break
+                    
+                    if not found_match:
+                        false_positives += 1
                 
                 # Count unmatched true spans as false negatives
                 false_negatives += len(true_spans) - len(matched_true)
@@ -241,7 +248,7 @@ def main():
         hidden_dropout_prob=0.2,  # Add dropout
         attention_probs_dropout_prob=0.2
     )
-    model.load_state_dict(torch.load(model_path))
+    # model.load_state_dict(torch.load(model_path))
     model.to(device)
     
     # Create dataset and dataloaders

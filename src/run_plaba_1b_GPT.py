@@ -61,7 +61,7 @@ class PLABA1bDataset:
                     'abstract_id': abstract_id,
                     'text': abstract_text,
                     'term': term,
-                    'actions': actions  # Now using 'actions' instead of 'action'
+                    'actions': actions
                 })
         
         return examples
@@ -121,8 +121,8 @@ class JargonActionDataset(Dataset):
             'labels': label_vector
         }
 
-def train_model(model, train_dataloader, num_epochs=1, learning_rate=2e-5, warmup_steps=0.1, patience=5):
-    """Train the model with early stopping."""
+def train_model(model, train_dataloader, num_epochs=20, learning_rate=2e-5, warmup_steps=0.1, patience=5):
+    """Train the model with early stopping and gradient accumulation."""
     # Setup optimizer
     optimizer = AdamW(model.parameters(), lr=learning_rate)
     
@@ -142,6 +142,9 @@ def train_model(model, train_dataloader, num_epochs=1, learning_rate=2e-5, warmu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
+    # Enable automatic mixed precision training
+    scaler = torch.cuda.amp.GradScaler()
+    
     # Training loop
     print(f"\nTraining on {device}")
     print(f"Total steps: {total_steps}")
@@ -150,48 +153,53 @@ def train_model(model, train_dataloader, num_epochs=1, learning_rate=2e-5, warmu
     no_improve_epochs = 0
     best_model_state = None
     
+    # Gradient accumulation steps
+    grad_accum_steps = 4  # Accumulate gradients over 4 batches
+    
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
+        optimizer.zero_grad()  # Zero gradients at start of epoch
+        
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
         
-        for batch in progress_bar:
+        for i, batch in enumerate(progress_bar):
             # Move batch to device
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
             
-            # Zero gradients
-            optimizer.zero_grad()
+            # Use automatic mixed precision
+            with torch.cuda.amp.autocast():
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
+                loss = outputs.loss / grad_accum_steps  # Normalize loss
             
-            # Forward pass
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
+            # Backward pass with gradient scaling
+            scaler.scale(loss).backward()
             
-            loss = outputs.loss
-            total_loss += loss.item()
+            if (i + 1) % grad_accum_steps == 0:
+                # Unscale gradients and clip
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # Optimizer step with gradient scaling
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
             
-            # Backward pass
-            loss.backward()
-            
-            # Clip gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # Update weights
-            optimizer.step()
-            scheduler.step()
-            
-            # Update progress bar
-            progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+            total_loss += loss.item() * grad_accum_steps
+            progress_bar.set_postfix({'loss': f'{loss.item() * grad_accum_steps:.4f}'})
         
         # Calculate average loss for epoch
         avg_loss = total_loss / len(train_dataloader)
         print(f"\nEpoch {epoch + 1} - Average loss: {avg_loss:.4f}")
         
-        # Check for improvement
+        # Early stopping check
         if avg_loss < best_loss:
             best_loss = avg_loss
             no_improve_epochs = 0
@@ -200,7 +208,6 @@ def train_model(model, train_dataloader, num_epochs=1, learning_rate=2e-5, warmu
             no_improve_epochs += 1
             print(f"No improvement for {no_improve_epochs} epochs")
         
-        # Early stopping
         if no_improve_epochs >= patience:
             print(f"\nEarly stopping after {epoch + 1} epochs")
             break
@@ -213,7 +220,6 @@ def train_model(model, train_dataloader, num_epochs=1, learning_rate=2e-5, warmu
     return model
 
 def evaluate_model(model, test_dataloader, id2label):
-    """Evaluate the model on test data."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
@@ -228,17 +234,30 @@ def evaluate_model(model, test_dataloader, id2label):
             labels = batch['labels'].to(device)
             
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            # For multi-label, use sigmoid and threshold
-            preds = (torch.sigmoid(outputs.logits) > 0.5).float()
+            logits = outputs.logits
+            
+            # Use different thresholds for different labels
+            thresholds = {
+                'SUBSTITUTE': 0.5,
+                'EXPLAIN': 0.3,    # Lower threshold for minority classes
+                'GENERALIZE': 0.3,
+                'OMIT': 0.3,
+                'EXEMPLIFY': 0.3
+            }
+            
+            # Apply thresholds
+            preds = torch.zeros_like(logits)
+            for i, label in id2label.items():
+                preds[:, i] = (torch.sigmoid(logits[:, i]) > thresholds[label]).float()
             
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
-    # Convert to numpy arrays for easier handling
+    # Convert to numpy arrays
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
     
-    # Calculate metrics
+    # Print detailed metrics
     print("\nClassification Report:")
     print(classification_report(all_labels, all_preds, target_names=list(id2label.values())))
     
@@ -268,7 +287,7 @@ def main():
     )
     
     # Create dataloader
-    train_dataloader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
     
     # Print some statistics
     print(f"Loaded {len(training_examples)} training examples")

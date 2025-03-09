@@ -8,3 +8,4 @@ models/
 job_file_results/
 __pycache__/
 *.py[cod]
+cache_models/

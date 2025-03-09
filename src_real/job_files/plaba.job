@@ -1,0 +1,14 @@
+#!/bin/bash
+#SBATCH --partition=gpu
+#SBATCH --gpus-per-node=1
+#SBATCH --job-name=plaba
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=18
+#SBATCH --time=3:00:00
+#SBATCH --output=plaba_%A.out  
+
+# activate the environment
+source medplaba/bin/activate
+
+# Run the script
+python src/run_plaba_1a.py

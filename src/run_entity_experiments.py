@@ -208,9 +208,8 @@ def train_and_evaluate(model, train_loader, val_loader, device, model_save_path,
 
 def evaluate_entities(model, val_loader, device):
     model.eval()
-    correct_chunks = 0  # True positives
-    found_guessed = 0   # Total predicted chunks
-    found_correct = 0   # Total actual chunks
+    all_predictions = []  # List to store predicted spans
+    all_labels = []      # List to store true spans
     
     with torch.no_grad():
         for batch in val_loader:
@@ -226,37 +225,65 @@ def evaluate_entities(model, val_loader, device):
                 pred_seq = pred_seq[:length].cpu().tolist()
                 label_seq = label_seq[:length].cpu().tolist()
                 
-                # Track current chunks for both predicted and true labels
-                curr_pred_chunk = None
-                curr_true_chunk = None
+                # Extract spans for predictions
+                pred_spans = []
+                start_idx = None
+                for idx, pred in enumerate(pred_seq):
+                    if pred != 0 and start_idx is None:  # Start of entity
+                        start_idx = idx
+                    elif (pred == 0 or idx == len(pred_seq) - 1) and start_idx is not None:  # End of entity
+                        end_idx = idx if pred == 0 else idx + 1
+                        pred_spans.append((start_idx, end_idx))
+                        start_idx = None
                 
-                # Iterate through sequence
-                for pred, true in zip(pred_seq, label_seq):
-                    if true == -100:  # Skip special tokens
-                        continue
-                        
-                    # Handle true chunks
-                    if true != 0:  # Not O
-                        if curr_true_chunk is None:
-                            curr_true_chunk = true
-                            found_correct += 1
-                    else:
-                        curr_true_chunk = None
-                        
-                    # Handle predicted chunks
-                    if pred != 0:  # Not O
-                        if curr_pred_chunk is None:
-                            curr_pred_chunk = pred
-                            found_guessed += 1
-                            # Check if this is also a true chunk start
-                            if pred == true:
-                                correct_chunks += 1
-                    else:
-                        curr_pred_chunk = None
+                # Extract spans for true labels
+                true_spans = []
+                start_idx = None
+                for idx, true in enumerate(label_seq):
+                    if true not in [-100, 0] and start_idx is None:  # Start of entity
+                        start_idx = idx
+                    elif (true in [-100, 0] or idx == len(label_seq) - 1) and start_idx is not None:  # End of entity
+                        end_idx = idx if true in [-100, 0] else idx + 1
+                        true_spans.append((start_idx, end_idx))
+                        start_idx = None
+                
+                all_predictions.append(pred_spans)
+                all_labels.append(true_spans)
     
-    # Calculate metrics
-    precision = correct_chunks / found_guessed if found_guessed > 0 else 0
-    recall = correct_chunks / found_correct if found_correct > 0 else 0
+    # Calculate metrics using 75% overlap criterion
+    tp = 0  # True positives
+    fp = 0  # False positives
+    fn = 0  # False negatives
+    
+    for pred_spans, true_spans in zip(all_predictions, all_labels):
+        matched_true = set()
+        
+        for pred_span in pred_spans:
+            found_match = False
+            for i, true_span in enumerate(true_spans):
+                if i not in matched_true:
+                    # Calculate overlap
+                    overlap_size = min(pred_span[1], true_span[1]) - max(pred_span[0], true_span[0])
+                    pred_size = pred_span[1] - pred_span[0]
+                    true_size = true_span[1] - true_span[0]
+                    
+                    if overlap_size > 0:
+                        overlap_ratio = overlap_size / max(pred_size, true_size)
+                        if overlap_ratio >= 0.75:  # 75% overlap threshold
+                            tp += 1
+                            matched_true.add(i)
+                            found_match = True
+                            break
+            
+            if not found_match:
+                fp += 1
+        
+        # Count unmatched true spans as false negatives
+        fn += len(true_spans) - len(matched_true)
+    
+    # Calculate final metrics
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
     
     return {
@@ -273,8 +300,8 @@ def run_experiments():
     # Define models to test
     models = {
         # 'BERT': (BertForTokenClassification, BertTokenizerFast, 'bert-base-uncased', 'bert-large-uncased')
-        # 'RoBERTa': (RobertaForTokenClassification, RobertaTokenizerFast, 'roberta-base', 'roberta-large')
-        'BioBERT': (AutoModelForTokenClassification, AutoTokenizer, 'dmis-lab/biobert-base-cased-v1.2', 'dmis-lab/biobert-large-cased-v1.1')
+        'RoBERTa': (RobertaForTokenClassification, RobertaTokenizerFast, 'roberta-base', 'roberta-large')
+        # 'BioBERT': (AutoModelForTokenClassification, AutoTokenizer, 'dmis-lab/biobert-base-cased-v1.2', 'dmis-lab/biobert-large-cased-v1.1')
         # 'PubMedBERT': (AutoModelForTokenClassification, AutoTokenizer, 'microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext', 'microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract')
     }
     
