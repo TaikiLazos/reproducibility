@@ -13,4 +13,4 @@ source medplaba/bin/activate
 MODEL="pubmedbert"
 
 # Run the script
-python src_real/medreadme.py  --model_name $MODEL 
+python src/medreadme.py  --model_name $MODEL 
