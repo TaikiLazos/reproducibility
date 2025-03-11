@@ -1,13 +1,11 @@
 import torch
-from transformers import RobertaTokenizerFast
-from torch.utils.data import Dataset
-import json
-from collections import Counter, defaultdict
-import numpy as np
-from typing import List, Dict
+from transformers import AutoTokenizer
+from typing import List
 import matplotlib.pyplot as plt
 import os
-from finetune_and_evaluate import JargonDataset
+import numpy as np
+from plaba import PLABADataset
+from medreadme import MedReadmeDataset
 
 def plot_distribution(data: List[int], title: str, xlabel: str, save_path: str):
     """Plot and save distribution histogram."""
@@ -39,7 +37,9 @@ def gather_detailed_statistics(dataset, dataset_name: str, output_dir: str = 'ou
     doc_lengths = []
     
     # Gather statistics
-    for example in dataset.examples:
+    examples = dataset.train_dataset if hasattr(dataset, 'train_dataset') else dataset.get_split('train')
+    
+    for example in examples:
         labels = example['labels']
         attention_mask = example['attention_mask']
         
@@ -48,10 +48,10 @@ def gather_detailed_statistics(dataset, dataset_name: str, output_dir: str = 'ou
         doc_lengths.append(doc_length)
         total_tokens += doc_length
         
-        # Count jargon terms (consecutive 1s)
+        # Count jargon terms (consecutive non-zero labels)
         current_span = 0
         for label in labels:
-            if label == 1:
+            if label != 0 and label != -100:  # Count any non-O and non-padding label
                 current_span += 1
             elif current_span > 0:
                 jargon_lengths.append(current_span)
@@ -112,97 +112,37 @@ def gather_detailed_statistics(dataset, dataset_name: str, output_dir: str = 'ou
     print("=" * 60)
     return stats
 
-class MedREADMEDataset(Dataset):
-    """Dataset class that handles MedREADME data with splits."""
-    def __init__(self, data_path: str, tokenizer, split: str = None):
-        self.tokenizer = tokenizer
-        self.split = split
-        self.examples = self._prepare_data(data_path)
-    
-    def _prepare_data(self, data_path):
-        examples = []
-        with open(data_path, 'r') as f:
-            data = json.load(f)
-        
-        # Filter by split if specified
-        if self.split:
-            data = [item for item in data if item.get('split') == self.split]
-        
-        for item in data:
-            tokens = item['tokens']
-            entities = item['entities']
-            
-            # Create BIO labels
-            labels = ['O'] * len(tokens)
-            for start, end, _, _ in entities:
-                labels[start] = 'B-JARGON'
-                for i in range(start + 1, end):
-                    labels[i] = 'I-JARGON'
-            
-            # Tokenize and align labels
-            tokenized = self.tokenizer(
-                tokens,
-                is_split_into_words=True,
-                add_special_tokens=True,
-                truncation=True,
-                padding='max_length',
-                max_length=512,
-                return_tensors='pt'
-            )
-            
-            # Convert BIO to binary labels
-            word_ids = tokenized.word_ids()
-            label_ids = []
-            
-            for word_idx in word_ids:
-                if word_idx is None:
-                    label_ids.append(-100)
-                else:
-                    label = labels[word_idx]
-                    label_ids.append(1 if label.startswith(('B-', 'I-')) else 0)
-            
-            examples.append({
-                'input_ids': tokenized['input_ids'][0],
-                'attention_mask': tokenized['attention_mask'][0],
-                'labels': torch.tensor(label_ids, dtype=torch.long)
-            })
-        
-        return examples
-    
-    def __len__(self):
-        return len(self.examples)
-    
-    def __getitem__(self, idx):
-        return self.examples[idx]
-
 def main():
-    # Initialize tokenizer
-    tokenizer = RobertaTokenizerFast.from_pretrained('roberta-large', add_prefix_space=True)
+    # Initialize tokenizer (works for both BERT and RoBERTa)
+    tokenizer = AutoTokenizer.from_pretrained('roberta-large', add_prefix_space=True)
     
-    # Load datasets
     print("Loading datasets...")
     
     # PLABA datasets
-    plaba_train = JargonDataset('data/PLABA_2024-Task_1/train.json', tokenizer, is_plaba=True)
-    plaba_test = JargonDataset('data/PLABA_2024-Task_1/task_1_testing.json', tokenizer, is_plaba=True)
+    plaba_dataset = PLABADataset(tokenizer, 'data/PLABA_2024-Task_1')
     
-    # Load MedREADME datasets with splits
-    medreadme_train = MedREADMEDataset('data/medreadme/jargon.json', tokenizer, split='train')
-    medreadme_val = MedREADMEDataset('data/medreadme/jargon.json', tokenizer, split='dev')
-    medreadme_test = MedREADMEDataset('data/medreadme/jargon.json', tokenizer, split='test')
+    # MedREADME datasets (binary classification)
+    medreadme_dataset = MedReadmeDataset(tokenizer, 'data/medreadme/jargon.json', classification_type='binary')
     
     # Gather and print statistics
     datasets = {
-        "PLABA Training": plaba_train,
-        "PLABA Testing": plaba_test,
-        "MedREADME Training": medreadme_train,
-        "MedREADME Validation": medreadme_val,
-        "MedREADME Testing": medreadme_test
+        "PLABA Training": plaba_dataset,
+        "MedREADME Binary": medreadme_dataset,
     }
     
     stats = {}
     for name, dataset in datasets.items():
         stats[name] = gather_detailed_statistics(dataset, name)
+
+    # Print comparative statistics
+    print("\nComparative Statistics:")
+    print("\nAverage Jargons per Document:")
+    for name, stat in stats.items():
+        print(f"{name}: {stat['avg_jargons']:.2f}")
+    
+    print("\nAverage Document Length:")
+    for name, stat in stats.items():
+        print(f"{name}: {stat['mean_doc_length']:.2f}")
 
 if __name__ == "__main__":
     main() 

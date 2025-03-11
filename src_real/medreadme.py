@@ -311,7 +311,6 @@ def train_and_evaluate(model, train_loader, val_loader, device, save_path, args)
     patience = 3    # for early stopping
     patience_counter = 0
     max_epochs = args.num_epochs
-    max_epochs = 1
 
     for epoch in range(max_epochs):
         # Training
@@ -562,7 +561,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="roberta", help="Name of the pretrained model to use")
     parser.add_argument("--batch_size", type=int, default=32, help="Training batch size")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument("--num_epochs", type=int, default=20, help="Number of training epochs")
     parser.add_argument("--data_dir", type=str, default="data/medreadme/jargon.json", help="Directory containing the data files")
 
     args = parser.parse_args()

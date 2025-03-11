@@ -2,8 +2,89 @@
 # apply a parser argument
 
 import json
-from inference_jargon import JargonDetector
 import html
+import argparse
+from transformers import AutoModelForTokenClassification, AutoTokenizer
+import torch
+from plaba import get_tokenizer
+import os
+
+models = {
+    'bert': 'bert-large-cased',
+    'roberta': 'roberta-large'
+}
+
+class TransferJargonDetector:
+    def __init__(self, model_path, model_name='roberta'):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Initialize base model and tokenizer
+        self.tokenizer = get_tokenizer(models[model_name], cache_dir="./cache_models")
+        base_model = AutoModelForTokenClassification.from_pretrained(
+            models[model_name],
+            num_labels=2,
+            cache_dir="./cache_models"
+        )
+        
+        # Load the trained model
+        self.model = AutoModelForTokenClassification.from_config(base_model.config)
+        self.model.load_state_dict(torch.load(model_path))
+        self.model.to(self.device)
+        self.model.eval()
+
+    def detect_jargons(self, text):
+        # Split into tokens (same as training)
+        tokens = text.split()
+        
+        # Tokenize using the same parameters as training
+        encoding = self.tokenizer(
+            tokens,
+            is_split_into_words=True,
+            padding='max_length',
+            truncation=True,
+            max_length=512,
+            return_tensors='pt'
+        ).to(self.device)
+
+        # Get predictions
+        with torch.no_grad():
+            outputs = self.model(**encoding)
+            predictions = torch.argmax(outputs.logits, dim=2)[0].cpu().tolist()
+
+        # Use the same word_ids alignment as in training
+        word_ids = encoding.word_ids()
+        
+        # Convert predictions to jargon spans
+        jargons = []
+        current_jargon = []
+        current_start = None
+        prev_word_id = None
+        
+        for idx, (pred, word_id) in enumerate(zip(predictions, word_ids)):
+            if word_id is not None:  # Skip special tokens
+                if word_id != prev_word_id:  # First subword of a word
+                    if current_jargon and pred == 0:  # End of jargon
+                        jargon_text = ' '.join(current_jargon)
+                        start_pos = text.find(jargon_text)
+                        if start_pos != -1:
+                            jargons.append((jargon_text, start_pos, start_pos + len(jargon_text)))
+                        current_jargon = []
+                    
+                    if pred == 1:  # Start or continue jargon
+                        if not current_jargon:  # Start new jargon
+                            current_start = word_id
+                        current_jargon.append(tokens[word_id])
+                
+                prev_word_id = word_id
+
+        # Don't forget the last jargon if it exists
+        if current_jargon:
+            jargon_text = ' '.join(current_jargon)
+            start_pos = text.find(jargon_text)
+            if start_pos != -1:
+                jargons.append((jargon_text, start_pos, start_pos + len(jargon_text)))
+
+        return jargons
 
 def load_test_data(abstract_path, annotations_path):
     # Load the first abstract
@@ -20,7 +101,7 @@ def load_test_data(abstract_path, annotations_path):
     
     return text, true_jargons
 
-def create_html_visualization(text, true_jargons, predicted_jargons):
+def create_html_visualization(text, true_jargons, predicted_jargons, model_name, output_file):
     # Sort jargons by length (longest first) to handle nested terms correctly
     true_jargons = sorted(true_jargons, key=len, reverse=True)
     predicted_jargons = sorted(predicted_jargons, key=lambda x: len(x[0]), reverse=True)
@@ -137,6 +218,7 @@ def create_html_visualization(text, true_jargons, predicted_jargons):
         </style>
     </head>
     <body>
+        <h2>Model: {model_name}</h2>
         <div class="legend">
             <span class="true-jargon">True Jargons (Not Predicted)</span>
             <span class="predicted-jargon">False Predictions</span>
@@ -149,10 +231,11 @@ def create_html_visualization(text, true_jargons, predicted_jargons):
     </html>
     """
     
-    with open('jargon_visualization.html', 'w') as f:
+    with open(output_file, 'w') as f:
         f.write(html_content)
     
-    # Print detected jargons for debugging
+    # Print statistics
+    print(f"\nResults for {model_name}:")
     print("\nTrue jargons:")
     for jargon in true_jargons:
         print(f"- {jargon}")
@@ -162,19 +245,34 @@ def create_html_visualization(text, true_jargons, predicted_jargons):
         print(f"- '{jargon}' (position {start}-{end})")
 
 def main():
-    # Load data
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default="roberta", choices=['bert', 'roberta'])
+    args = parser.parse_args()
+
+    # Create output directory for visualizations
+    os.makedirs('output/visualization', exist_ok=True)
+
+    # Load test data
     text, true_jargons = load_test_data(
         "data/PLABA_2024-Task_1/abstracts/Q19_A1.src.txt",
         "data/PLABA_2024-Task_1/task_1_testing.json"
     )
     
-    # Get predictions
-    detector = JargonDetector("output/jargon_model_roberta_large.pt")
-    predicted_jargons = detector.detect_jargons(text)
+    # Define models to visualize
+    transfer_models = [
+        ('medreadme_to_plaba', 'output/transfer/medreadme_to_plaba.pt'),
+        ('plaba_to_medreadme', 'output/transfer/plaba_to_medreadme.pt'),
+        ('plaba_plus_medreadme_to_plaba', 'output/transfer/plaba_plus_medreadme_to_plaba.pt'),
+        ('medreadme_plus_plaba_to_plaba', 'output/transfer/medreadme_plus_plaba_to_plaba.pt')
+    ]
     
-    # Create visualization
-    create_html_visualization(text, true_jargons, predicted_jargons)
-    print("Visualization saved to jargon_visualization.html")
+    # Create visualization for each model
+    for model_name, model_path in transfer_models:
+        detector = TransferJargonDetector(model_path, args.model_name)
+        predicted_jargons = detector.detect_jargons(text)
+        output_file = f'output/visualization/Q19_A1_{model_name}.html'
+        create_html_visualization(text, true_jargons, predicted_jargons, model_name, output_file)
+        print(f"Visualization saved to {output_file}")
 
 if __name__ == "__main__":
     main() 

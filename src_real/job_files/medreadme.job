@@ -4,11 +4,13 @@
 #SBATCH --job-name=medreadme
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=18
-#SBATCH --time=3:00:00
+#SBATCH --time=2:00:00
 #SBATCH --output=medreadme_%A.out
 
 # activate the environment
 source medplaba/bin/activate
 
+MODEL="pubmedbert"
+
 # Run the script
-python src/medreadme.py  --model_name "bert" --evaluation_level "entity" 
+python src_real/medreadme.py  --model_name $MODEL 
