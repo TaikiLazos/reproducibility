@@ -12,7 +12,7 @@ from tqdm import tqdm
 models = {
     'bert': ('bert-base-uncased', 'bert-large-uncased'),
     'roberta': ('roberta-base', 'roberta-large'),
-    'biobert': ('dmis-lab/biobert-base-cased-v1.1', 'dmis-lab/biobert-large-cased-v1.1-squad'),
+    'biobert': ('dmis-lab/biobert-base-cased-v1.1', 'dmis-lab/biobert-large-cased-v1.1'),
     'pubmedbert': ('microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext', 'microsoft/BiomedNLP-BiomedBERT-large-uncased-abstract')
 }
 
@@ -170,51 +170,76 @@ class MedReadmeDataset(Dataset):
         return self.split_data[split]
 
 
-def calculate_metrics(all_predictions, all_labels, level='entity'):
-    """Helper function to calculate metrics for both token and entity level"""
-    tp = fp = fn = 0
+def calculate_metrics(all_predictions, all_labels, level='entity', num_labels=2):
+    """Helper function to calculate metrics for both token and entity level with per-class metrics"""
+    # Initialize per-class counters
+    class_metrics = {i: {'tp': 0, 'fp': 0, 'fn': 0} for i in range(num_labels)}
     
     if level == 'token':
         for preds, labels in zip(all_predictions, all_labels):
             for p, l in zip(preds, labels):
                 if l == -100:  # Skip padding tokens
                     continue
-                    
-                # Only count predictions for actual entity tokens (non-O)
+                
                 if l != 0:  # If it's a true entity token
                     if p == l:  # Correct prediction
-                        tp += 1
+                        class_metrics[l]['tp'] += 1
                     else:  # Wrong prediction
-                        fn += 1
+                        class_metrics[l]['fn'] += 1
+                        if p != 0:  # If predicted as different class
+                            class_metrics[p]['fp'] += 1
                 elif p != 0:  # False positive: predicted entity when there wasn't one
-                    fp += 1
-                # Note: We don't count O->O predictions
-    else:  # entity-level metrics remain the same since they already only consider entities
+                    class_metrics[p]['fp'] += 1
+    else:  # entity-level
         for preds, labels in zip(all_predictions, all_labels):
             pred_entities = extract_entities(preds)
             true_entities = extract_entities(labels)
             
-            # Count matches
-            for pred_ent in pred_entities:
-                if pred_ent in true_entities:
-                    tp += 1
+            # Group entities by class
+            for ent in pred_entities:
+                start, end, class_id = ent
+                if ent in true_entities:
+                    class_metrics[class_id]['tp'] += 1
                 else:
-                    fp += 1
+                    class_metrics[class_id]['fp'] += 1
             
-            for true_ent in true_entities:
-                if true_ent not in pred_entities:
-                    fn += 1
+            for ent in true_entities:
+                start, end, class_id = ent
+                if ent not in pred_entities:
+                    class_metrics[class_id]['fn'] += 1
     
-    # Calculate metrics
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    # Calculate per-class metrics
+    results = {'overall': {'f1': 0, 'precision': 0, 'recall': 0}}
+    total_tp = total_fp = total_fn = 0
     
-    return {
-        'f1': f1 * 100,
-        'precision': precision * 100,
-        'recall': recall * 100
+    for class_id, metrics in class_metrics.items():
+        tp, fp, fn = metrics['tp'], metrics['fp'], metrics['fn']
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        results[f'class_{class_id}'] = {
+            'f1': f1 * 100,
+            'precision': precision * 100,
+            'recall': recall * 100
+        }
+    
+    # Calculate overall metrics
+    overall_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
+    overall_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
+    overall_f1 = 2 * overall_precision * overall_recall / (overall_precision + overall_recall) if (overall_precision + overall_recall) > 0 else 0
+    
+    results['overall'] = {
+        'f1': overall_f1 * 100,
+        'precision': overall_precision * 100,
+        'recall': overall_recall * 100
     }
+    
+    return results
 
 def test(model_path, test_loader, device, current_model):
     """Evaluate model on test set for both token and entity level"""
@@ -296,9 +321,9 @@ def test(model_path, test_loader, device, current_model):
         percentage = (count / total_preds) * 100
         print(f"Label {pred}: {count} ({percentage:.2f}%)")
     
-    # Calculate metrics for both levels
-    token_results = calculate_metrics(all_predictions, all_labels, level='token')
-    entity_results = calculate_metrics(all_predictions, all_labels, level='entity')
+    # Calculate metrics for both levels with num_labels
+    token_results = calculate_metrics(all_predictions, all_labels, level='token', num_labels=num_labels)
+    entity_results = calculate_metrics(all_predictions, all_labels, level='entity', num_labels=num_labels)
     
     return {
         'token': token_results,
@@ -317,7 +342,6 @@ def train_and_evaluate(model, train_loader, val_loader, device, save_path, args)
         model.train()
         total_loss = 0
         
-        # Add progress bar for each epoch
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{max_epochs}')
         
         for batch in progress_bar:
@@ -328,26 +352,21 @@ def train_and_evaluate(model, train_loader, val_loader, device, save_path, args)
                 labels=batch['labels'].to(device)
             )
 
-            # print(outputs.logits.shape) # torch.Size([32, 250, # of labels])
-            # print(batch['labels'].shape) # torch.Size([32, 250])
-
             loss = outputs.loss
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
             
-            # Update progress bar with current loss
             progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
         
         avg_loss = total_loss / len(train_loader)
         print(f"\nEpoch {epoch+1}/{max_epochs}, Average Loss: {avg_loss:.4f}")
 
-        # Evaluate it on the validation set
+        # Validation
         model.eval()
         all_predictions = []
         all_labels = []
         
-        # Add progress bar for validation
         val_progress = tqdm(val_loader, desc='Validating')
         
         with torch.no_grad():
@@ -358,30 +377,32 @@ def train_and_evaluate(model, train_loader, val_loader, device, save_path, args)
                 )
                 predictions = torch.argmax(outputs.logits, dim=2)
                 
-                # Get actual length of each sequence (ignore padding)
                 mask = batch['attention_mask'].bool()
                 
-                # Collect predictions and labels for each sequence
                 for pred_seq, label_seq, seq_mask in zip(predictions, batch['labels'], mask):
                     length = seq_mask.sum().item()
-                    
-                    # Only keep predictions and labels for actual tokens (no padding)
                     pred_seq = pred_seq[:length].cpu().tolist()
                     label_seq = label_seq[:length].cpu().tolist()
-                    
                     all_predictions.append(pred_seq)
                     all_labels.append(label_seq)
         
-        # Always calculate entity-level metrics for model selection
-        results = calculate_metrics(all_predictions, all_labels, level='entity')
+        # Calculate entity-level metrics for model selection
+        results = calculate_metrics(all_predictions, all_labels, level='entity', num_labels=model.num_labels)
 
         print(f"\nValidation Results:")
-        print(f"Overall F1: {results['f1']:.2f}")
-        print(f"Precision: {results['precision']:.2f}")
-        print(f"Recall: {results['recall']:.2f}")
+        print(f"Overall F1: {results['overall']['f1']:.2f}")
+        print(f"Overall Precision: {results['overall']['precision']:.2f}")
+        print(f"Overall Recall: {results['overall']['recall']:.2f}")
         
-        # Early stopping check using entity-level F1
-        current_f1 = results['f1']
+        # Print per-class metrics
+        for class_key in sorted([k for k in results.keys() if k != 'overall']):
+            print(f"\n{class_key}:")
+            print(f"F1: {results[class_key]['f1']:.2f}")
+            print(f"Precision: {results[class_key]['precision']:.2f}")
+            print(f"Recall: {results[class_key]['recall']:.2f}")
+        
+        # Early stopping check using overall entity-level F1
+        current_f1 = results['overall']['f1']
         if current_f1 > best_f1:
             best_f1 = current_f1
             torch.save(model.state_dict(), save_path)
@@ -516,44 +537,30 @@ def print_results(results):
     # Print separate tables for token and entity level metrics
     for level in ['token', 'entity']:
         print(f"\n{level.upper()}-LEVEL METRICS")
-        headers = ['Models', 'Binary', '3-Cls', '7-Cls']
-        table_data = []
         
-        # Add large models
-        table_data.append(['Large-size Models', '', '', ''])
-        row = ['F1']
-        for cls_type in ['binary', '3-cls', '7-cls']:
-            row.append(f"{results['large'][cls_type][level]['f1']:.2f}")
-        table_data.append(row)
-        
-        row = ['Precision']
-        for cls_type in ['binary', '3-cls', '7-cls']:
-            row.append(f"{results['large'][cls_type][level]['precision']:.2f}")
-        table_data.append(row)
-        
-        row = ['Recall']
-        for cls_type in ['binary', '3-cls', '7-cls']:
-            row.append(f"{results['large'][cls_type][level]['recall']:.2f}")
-        table_data.append(row)
-        
-        # Add base models
-        table_data.append(['Base-size Models', '', '', ''])
-        row = ['F1']
-        for cls_type in ['binary', '3-cls', '7-cls']:
-            row.append(f"{results['base'][cls_type][level]['f1']:.2f}")
-        table_data.append(row)
-        
-        row = ['Precision']
-        for cls_type in ['binary', '3-cls', '7-cls']:
-            row.append(f"{results['base'][cls_type][level]['precision']:.2f}")
-        table_data.append(row)
-        
-        row = ['Recall']
-        for cls_type in ['binary', '3-cls', '7-cls']:
-            row.append(f"{results['base'][cls_type][level]['recall']:.2f}")
-        table_data.append(row)
-        
-        print(tabulate(table_data, headers=headers, tablefmt='grid'))
+        for size in ['large', 'base']:
+            print(f"\n{size.upper()}-SIZE MODELS")
+            
+            for cls_type in ['binary', '3-cls', '7-cls']:
+                print(f"\n{cls_type} Classification:")
+                headers = ['Class', 'F1', 'Precision', 'Recall']
+                table_data = []
+                
+                metrics = results[size][cls_type][level]
+                # Add overall metrics
+                table_data.append(['Overall',
+                                 f"{metrics['overall']['f1']:.2f}",
+                                 f"{metrics['overall']['precision']:.2f}",
+                                 f"{metrics['overall']['recall']:.2f}"])
+                
+                # Add per-class metrics
+                for class_key in sorted([k for k in metrics.keys() if k != 'overall']):
+                    table_data.append([class_key,
+                                     f"{metrics[class_key]['f1']:.2f}",
+                                     f"{metrics[class_key]['precision']:.2f}",
+                                     f"{metrics[class_key]['recall']:.2f}"])
+                
+                print(tabulate(table_data, headers=headers, tablefmt='grid'))
 
 
 if __name__ == "__main__":

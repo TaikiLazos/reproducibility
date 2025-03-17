@@ -1,44 +1,66 @@
-# Reproducing the results of MedREADME and PLABA 2024 Task 1
+# Benchmarking Jargon Detection on Medical Abstracts
+
+## Overview
+This project focuses on benchmarking jargon detection in medical abstracts using transformer-based models. We evaluate different approaches for identifying medical and technical jargon that may be challenging for general readers to understand. Our work builds upon and extends the jargon detection component from the MedREADME paper.
 
 ## Setting up the environment
 
-You can set up the environment using the following command:
+You can set up the environment using the following commands:
 
-```
+```bash
 virtualenv medplaba
 source medplaba/bin/activate
 pip install -r requirements.txt
 ```
 
-## MedReadMe
-This project focuses on reproducing the jargon detection component of the MedREADME paper's text simplification task. Using their dataset of medical texts and jargons, we aim to identify and analyze medical jargon that may be difficult for general readers to understand.
+## Experiments
 
-Table 8 was replicated using the MedREADME dataset and the configuration of the MedREADME paper.
+### MedREADME Jargon Detection
+We replicate and extend the jargon detection component from the MedREADME paper, focusing on identifying medical terminology that requires simplification. Our implementation supports multiple transformer architectures and provides detailed error analysis.
 
-To run the code, run the following command:
-```
-MODEL="roberta"  # You can choose from bert, roberta, biobert, pubmedbert
+To run the experiments:
+```bash
+MODEL="roberta"  # Options: bert, roberta, biobert, pubmedbert
 
-# Run the script
-python src/medreadme.py  --model_name $MODEL 
+# Run with Python
+python src/medreadme.py --model_name $MODEL 
 
-# or run with a job script
+# Or submit as a job
 sbatch src/job_files/medreadme.job
 ```
 
+### PLABA 2024 Task 1a
+Implementation of the PLABA 2024 Task 1a for jargon detection:
 
-## PLABA 2024 Task 1
-
-### 1a
-Run the following command to train the model:
-```
-python src/plaba.py  --experiment_type 1a
+```bash
+python src/plaba.py --experiment_type 1a
 ```
 
-## Transfer Learning
-Run the following command to replicate my results:
-```
+### Transfer Learning Experiments
+Evaluate transfer learning effectiveness between tasks:
+
+```bash
 python src/transfer_learning.py
+```
+
+## Analysis Tools
+
+### Data Statistics
+Generate dataset statistics and visualizations:
+```bash
+python src/data_statistics.py
+```
+
+### Error Analysis
+Analyze model predictions and error patterns:
+```bash
+python src/error_analysis.py --model_name roberta --cls_type 3-cls
+```
+
+### Jargon Visualization
+Visualize jargon detection results:
+```bash
+python src/visualize_jargons.py --model_name roberta --cls_type 3-cls --num_samples 5
 ```
 
 ## Data Statistics

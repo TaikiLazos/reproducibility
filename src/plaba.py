@@ -5,9 +5,16 @@ import json
 from transformers import AutoModelForTokenClassification, AutoTokenizer, AdamW
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+import nltk
+
+nltk.download('punkt')
+nltk.download('punkt_tab')
+
 models = {
     'bert': 'bert-large-cased',
-    'roberta': 'roberta-large'
+    'roberta': 'roberta-large',
+    'biobert': 'dmis-lab/biobert-large-cased-v1.1',
+    'pubmedbert': 'microsoft/BiomedNLP-BiomedBERT-large-uncased-abstract'
 }
 
 class PLABADataset(Dataset):
@@ -24,9 +31,22 @@ class PLABADataset(Dataset):
             'I': 1
         }
         
-        self.train_dataset, self.val_dataset, self.test_dataset = self.create_dataset()
+        self.sent_tokenizer = nltk.sent_tokenize
+        
+        self.train_dataset, self.val_dataset, self.test_dataset = self.create_dataset()   
 
     def create_dataset(self):
+        def preprocess_text(text):
+            # Add spaces around punctuation for proper tokenization
+            for punct in ['(', ')', '.', ',', ':', ';']:
+                text = text.replace(punct, f' {punct} ')
+            return ' '.join(text.split())
+
+        def split_into_sentences(text):
+            text = preprocess_text(text)
+            sentences = self.sent_tokenizer(text)
+            return [sent.split() for sent in sentences]
+
         def create_bio_tags(tokens, jargon_terms):
             tokens_lower = [t.lower() for t in tokens]
             bio_tags = ['O'] * len(tokens)
@@ -42,31 +62,25 @@ class PLABADataset(Dataset):
             return bio_tags
 
         def process_example(tokens, bio_tags):
-            # Tokenize the input
             encoding = self.tokenizer(
                 tokens,
                 is_split_into_words=True,
                 padding='max_length',
                 truncation=True,
-                max_length=512,  # 700 covers 95% of the data but 512 is the max length Roberta can handle
+                max_length=192,  # Increased from 128 to 192 to cover max length of 171
                 return_tensors='pt'
             )
 
-            # Align labels with subwords
             word_ids = encoding.word_ids()
             label_ids = []
             prev_word_id = None
 
             for word_id in word_ids:
                 if word_id is None:
-                    # Special tokens get -100 label
                     label_ids.append(-100)
                 elif word_id != prev_word_id:
-                    # First subword of a word gets the original label
                     label_ids.append(self.label2id[bio_tags[word_id]])
                 else:
-                    # Subsequent subwords of a word get the same label
-                    # For B- tags, subsequent subwords should be I-
                     if bio_tags[word_id] == 'B':
                         label_ids.append(self.label2id['I'])
                     else:
@@ -79,31 +93,38 @@ class PLABADataset(Dataset):
                 'labels': torch.tensor(label_ids)
             }
 
+        # Process training data
         train_examples = []
         for doc_id, jargon_dict in self.train_data.items():
             with open(f"{self.data_path}/abstracts/{doc_id}.src.txt", 'r') as f:
                 text = f.read()
-                tokens = text.split()
-            
-            bio_tags = create_bio_tags(tokens, jargon_dict.keys())
-            example = process_example(tokens, bio_tags)
-            train_examples.append(example)
+                sentences = split_into_sentences(text)
+                
+                for sent_tokens in sentences:
+                    if not sent_tokens:  # Skip empty sentences
+                        continue
+                    bio_tags = create_bio_tags(sent_tokens, jargon_dict.keys())
+                    example = process_example(sent_tokens, bio_tags)
+                    train_examples.append(example)
 
-        # Split into train and validation (90/10 split)
-        split_idx = int(len(train_examples) * 0.9)
-        train_set = train_examples[:split_idx]
-        val_set = train_examples[split_idx:]
-        
         # Process test data
         test_set = []
         for doc_id, jargon_dict in self.test_data.items():
             with open(f"{self.data_path}/abstracts/{doc_id}.src.txt", 'r') as f:
                 text = f.read()
-                tokens = text.split()
-            
-            bio_tags = create_bio_tags(tokens, jargon_dict.keys())
-            example = process_example(tokens, bio_tags)
-            test_set.append(example)
+                sentences = split_into_sentences(text)
+                
+                for sent_tokens in sentences:
+                    if not sent_tokens:
+                        continue
+                    bio_tags = create_bio_tags(sent_tokens, jargon_dict.keys())
+                    example = process_example(sent_tokens, bio_tags)
+                    test_set.append(example)
+
+        # Split training data into train and validation sets
+        split_idx = int(len(train_examples) * 0.9)
+        train_set = train_examples[:split_idx]
+        val_set = train_examples[split_idx:]
         
         return train_set, val_set, test_set
 
@@ -296,9 +317,6 @@ def train(model, train_loader, val_loader, device, args, save_path):
     return best_f1
             
 
-
-
-# TODO
 def test(model_path, test_loader, device, model):
     num_labels = 2
     # Create new model with same config as current_model
@@ -405,8 +423,6 @@ def run_plaba_1a(args):
     train_loader = DataLoader(dataset.train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(dataset.val_dataset, batch_size=args.batch_size)
     test_loader = DataLoader(dataset.test_dataset, batch_size=args.batch_size)
-
-
     # Train the model
     save_path = f'output/plaba/{args.model_name}_1a.pt'
     train(model, train_loader, val_loader, device, args, save_path)
@@ -427,8 +443,18 @@ def print_results(results):
         print(f"Recall: {results[level]['recall']:.2f}")
 
 
+# TODO: WIP
 def run_plaba_1b(args):
-    pass
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    cache_dir = "./cache_models"
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs("output/plaba", exist_ok=True)
+
+    model = models[args.model_name]
+    print(f"Loading the model: {model}")
+    
+    tokenizer = get_tokenizer(model, cache_dir=cache_dir)
+
 
 
 if __name__ == "__main__":
