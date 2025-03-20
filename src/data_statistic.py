@@ -128,10 +128,10 @@ def gather_detailed_statistics(dataset, dataset_name: str, split: str = 'train',
     print("\nBasic Statistics:")
     print(f"Number of examples: {stats['num_examples']}")
     print(f"Total number of jargon terms: {stats['total_jargons']}")
-    print(f"Average jargon terms per document: {stats['avg_jargons']:.2f}")
-    print(f"Average tokens per document: {stats['avg_tokens']:.2f}")
+    print(f"Average jargon terms per sentence: {stats['avg_jargons']:.2f}")
+    print(f"Average tokens per sentence: {stats['avg_tokens']:.2f}")
     
-    print("\nDocument Length Statistics:")
+    print("\nSentence Length Statistics:")
     print(f"Min: {stats['min_doc_length']}")
     print(f"Max: {stats['max_doc_length']}")
     print(f"Mean: {stats['mean_doc_length']:.2f}")
@@ -158,14 +158,86 @@ def gather_detailed_statistics(dataset, dataset_name: str, split: str = 'train',
     
     plot_distribution(
         doc_lengths,
-        f"{dataset_name} {split.upper()} - Document Length Distribution",
-        "Document Length (tokens)",
+        f"{dataset_name} {split.upper()} - Sentence Length Distribution",
+        "Sentence Length (tokens)",
         os.path.join(output_dir, f"{dataset_name.lower().replace(' ', '_')}_{split}_doc_lengths.png"),
         is_jargon=False
     )
     
     print("=" * 60)
     return stats
+
+def plot_sentence_length_comparison(datasets_data, output_dir: str):
+    """Plot sentence length distributions for multiple datasets in one figure."""
+    plt.figure(figsize=(12, 6))
+    
+    # Set global font sizes
+    plt.rcParams.update({
+        'font.size': 16,
+        'axes.titlesize': 20,
+        'axes.labelsize': 16,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14
+    })
+    
+    colors = ['#FF7F50', '#4169E1']  # Coral and Royal Blue
+    alpha = 0.7
+    bins = np.linspace(0, 200, 25)  # Changed max to 200
+    
+    # Plot histograms
+    for (name, data), color in zip(datasets_data.items(), colors):
+        # Cap the data at 200 for visualization
+        capped_data = [min(x, 200) for x in data]
+        plt.hist(capped_data, bins=bins, alpha=alpha, color=color, label=name, 
+                edgecolor='black', linewidth=1.5)
+    
+    plt.title('Sentence Length Distribution Comparison\n(Training Split)', 
+              fontsize=20, pad=15)
+    plt.xlabel('Sentence Length (tokens)', fontsize=16)
+    plt.ylabel('Frequency', fontsize=16)
+    
+    # Make legend bigger and more prominent
+    plt.legend(fontsize=18, loc='upper right',
+              frameon=True,
+              framealpha=1.0,
+              edgecolor='black',
+              fancybox=True,
+              borderpad=1.0,
+              labelspacing=0.8)
+    
+    # Style improvements
+    plt.grid(True, alpha=0.3, linestyle='--', linewidth=1.2)
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.gca().spines['left'].set_linewidth(1.5)
+    plt.gca().spines['bottom'].set_linewidth(1.5)
+    
+    # Set x-axis limit explicitly
+    plt.xlim(0, 200)
+    
+    # Add mean lines with better positioned text
+    y_max = plt.gca().get_ylim()[1]
+    text_positions = [0.85, 0.7]  # Adjusted heights
+    
+    for (name, data), color, text_pos in zip(datasets_data.items(), colors, text_positions):
+        mean_length = np.mean(data)
+        plt.axvline(x=mean_length, color=color, linestyle='--', alpha=0.8, linewidth=2)
+        # Make mean value text more prominent
+        plt.text(mean_length+10, y_max * text_pos, 
+                f'{name}\nMean: {mean_length:.1f}', 
+                color=color, 
+                alpha=1.0,
+                fontsize=16,
+                bbox=dict(facecolor='white', 
+                         alpha=1.0,  # Fully opaque background
+                         edgecolor=color,  # Add border in same color
+                         pad=5,
+                         boxstyle='round,pad=0.5'))
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'sentence_length_comparison.png'), 
+                dpi=300, bbox_inches='tight')
+    plt.close()
 
 def main():
     parser = argparse.ArgumentParser()
@@ -206,15 +278,30 @@ def main():
     print("\nComparative Statistics:")
     for split in args.splits:
         print(f"\n{split.upper()} Split Statistics:")
-        print("\nAverage Jargons per Document:")
+        print("\nAverage Jargons per Sentence:")
         for name in datasets:
             if split in stats[name]:
                 print(f"{name}: {stats[name][split]['avg_jargons']:.2f}")
         
-        print("\nAverage Document Length:")
+        print("\nAverage Sentence Length:")
         for name in datasets:
             if split in stats[name]:
                 print(f"{name}: {stats[name][split]['mean_doc_length']:.2f}")
+
+    # Collect sentence lengths for training split
+    datasets_lengths = {}
+    for name, dataset in datasets.items():
+        if name == "PLABA":
+            examples = dataset.train_dataset
+        else:  # MedReadMe
+            examples = dataset.get_split('train')
+            
+        doc_lengths = [example['attention_mask'].sum().item() 
+                      for example in examples]
+        datasets_lengths[name] = doc_lengths
+    
+    # Create comparison plot
+    plot_sentence_length_comparison(datasets_lengths, 'output/statistics')
 
 if __name__ == "__main__":
     main() 

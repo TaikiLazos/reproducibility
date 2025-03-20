@@ -18,18 +18,24 @@ models = {
 }
 
 class PLABADataset(Dataset):
-    def __init__(self, tokenizer, data_path):
+    def __init__(self, tokenizer, data_path, task='1a'):
         self.tokenizer = tokenizer
         self.data_path = data_path
+        self.task = task
         self.train_data = json.load(open(os.path.join(data_path, "train.json")))
         self.test_data = json.load(open(os.path.join(data_path, "task_1_testing.json")))
         
-        # Create label mapping for BIO tags
-        self.label2id = {
+        # Create label mapping for BIO tags (task 1a)
+        self.bio_label2id = {
             'O': 0,
             'B': 1,
             'I': 1
         }
+        
+        # Create label mapping for classification (task 1b)
+        self.action_labels = ['SUBSTITUTE', 'EXPLAIN', 'GENERALIZE', 'OMIT', 'EXEMPLIFY']
+        self.action_label2id = {label: i for i, label in enumerate(self.action_labels)}
+        self.id2action_label = {i: label for i, label in enumerate(self.action_labels)}
         
         self.sent_tokenizer = nltk.sent_tokenize
         
@@ -61,7 +67,25 @@ class PLABADataset(Dataset):
             
             return bio_tags
 
-        def process_example(tokens, bio_tags):
+        def get_action_labels(jargon, jargon_dict):
+            """Get unique action labels for a jargon term"""
+            if jargon not in jargon_dict:
+                return []
+            
+            # Get unique action types from all alternatives
+            action_types = set()
+            for alt in jargon_dict[jargon]:
+                action_types.add(alt[0])  # alt[0] is the action type
+            
+            # Convert to multi-hot encoding
+            multi_hot = [0] * len(self.action_labels)
+            for action in action_types:
+                if action in self.action_label2id:
+                    multi_hot[self.action_label2id[action]] = 1
+            
+            return multi_hot
+
+        def process_example(tokens, bio_tags, jargon_terms=None, jargon_dict=None):
             encoding = self.tokenizer(
                 tokens,
                 is_split_into_words=True,
@@ -74,24 +98,48 @@ class PLABADataset(Dataset):
             word_ids = encoding.word_ids()
             label_ids = []
             prev_word_id = None
+            action_labels = None
 
+            # Process BIO tags
             for word_id in word_ids:
                 if word_id is None:
                     label_ids.append(-100)
                 elif word_id != prev_word_id:
-                    label_ids.append(self.label2id[bio_tags[word_id]])
+                    label_ids.append(self.bio_label2id[bio_tags[word_id]])
                 else:
                     if bio_tags[word_id] == 'B':
-                        label_ids.append(self.label2id['I'])
+                        label_ids.append(self.bio_label2id['I'])
                     else:
-                        label_ids.append(self.label2id[bio_tags[word_id]])
+                        label_ids.append(self.bio_label2id[bio_tags[word_id]])
                 prev_word_id = word_id
 
-            return {
+            # Process action labels for task 1b
+            if self.task == '1b' and jargon_terms is not None and jargon_dict is not None:
+                action_labels = []
+                for word_id in word_ids:
+                    if word_id is None:
+                        action_labels.append([0] * len(self.action_labels))
+                    else:
+                        # Find if this token is part of a jargon term
+                        current_pos = 0
+                        for term in jargon_terms:
+                            term_tokens = term.lower().split()
+                            if word_id < len(tokens) and tokens[word_id].lower() in term_tokens:
+                                action_labels.append(get_action_labels(term, jargon_dict))
+                                break
+                        else:
+                            action_labels.append([0] * len(self.action_labels))
+
+            example = {
                 'input_ids': encoding['input_ids'][0],
                 'attention_mask': encoding['attention_mask'][0],
                 'labels': torch.tensor(label_ids)
             }
+            
+            if action_labels is not None:
+                example['action_labels'] = torch.tensor(action_labels)
+            
+            return example
 
         # Process training data
         train_examples = []
@@ -104,7 +152,12 @@ class PLABADataset(Dataset):
                     if not sent_tokens:  # Skip empty sentences
                         continue
                     bio_tags = create_bio_tags(sent_tokens, jargon_dict.keys())
-                    example = process_example(sent_tokens, bio_tags)
+                    example = process_example(
+                        sent_tokens, 
+                        bio_tags,
+                        jargon_dict.keys() if self.task == '1b' else None,
+                        jargon_dict if self.task == '1b' else None
+                    )
                     train_examples.append(example)
 
         # Process test data
@@ -118,7 +171,12 @@ class PLABADataset(Dataset):
                     if not sent_tokens:
                         continue
                     bio_tags = create_bio_tags(sent_tokens, jargon_dict.keys())
-                    example = process_example(sent_tokens, bio_tags)
+                    example = process_example(
+                        sent_tokens, 
+                        bio_tags,
+                        jargon_dict.keys() if self.task == '1b' else None,
+                        jargon_dict if self.task == '1b' else None
+                    )
                     test_set.append(example)
 
         # Split training data into train and validation sets
@@ -430,20 +488,35 @@ def run_plaba_1a(args):
     # Test the best model
     test_results = test(save_path, test_loader, device, model)
 
-    print_results(test_results)
+    print_results(test_results, '1a')
     
     return test_results
 
-def print_results(results):
-    # Print separate tables for token and entity level metrics
-    for level in ['token', 'entity']:
-        print(f"\n{level.upper()}-LEVEL METRICS")
-        print(f"F1: {results[level]['f1']:.2f}")
-        print(f"Precision: {results[level]['precision']:.2f}") 
-        print(f"Recall: {results[level]['recall']:.2f}")
+def print_results(results, task='1a'):
+    """Print results in a formatted table"""
+    if task == '1a':
+        # For task 1a (detection), show both token and entity level metrics
+        for level in ['token', 'entity']:
+            print(f"\n{level.upper()}-LEVEL METRICS")
+            print(f"F1: {results[level]['f1']:.2f}")
+            print(f"Precision: {results[level]['precision']:.2f}") 
+            print(f"Recall: {results[level]['recall']:.2f}")
+    else:
+        # For task 1b (classification), show overall and per-action metrics
+        print("\nENTITY-LEVEL METRICS")
+        print("\nOverall Metrics:")
+        print(f"F1: {results['f1']:.2f}")
+        print(f"Precision: {results['precision']:.2f}")
+        print(f"Recall: {results['recall']:.2f}")
+        
+        print("\nPer-Action Metrics:")
+        for action in ['SUBSTITUTE', 'EXPLAIN', 'GENERALIZE', 'OMIT', 'EXEMPLIFY']:
+            print(f"\n{action}:")
+            print(f"F1: {results[action]['f1']:.2f}")
+            print(f"Precision: {results[action]['precision']:.2f}")
+            print(f"Recall: {results[action]['recall']:.2f}")
 
 
-# TODO: WIP
 def run_plaba_1b(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     cache_dir = "./cache_models"
@@ -454,8 +527,237 @@ def run_plaba_1b(args):
     print(f"Loading the model: {model}")
     
     tokenizer = get_tokenizer(model, cache_dir=cache_dir)
+    
+    # Initialize the model with number of action labels
+    model = AutoModelForTokenClassification.from_pretrained(
+        model,
+        num_labels=5,  # 5 action types
+        cache_dir=cache_dir
+    )
+    
+    # Modify the model's forward pass to use sigmoid activation
+    def forward_with_sigmoid(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
+        # Get the base model (works for both BERT and RoBERTa)
+        base_model = getattr(self, 'bert', getattr(self, 'roberta', None))
+        if base_model is None:
+            raise ValueError("Model architecture not supported. Must be BERT or RoBERTa.")
+            
+        outputs = base_model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+        sequence_output = outputs[0]
+        logits = self.classifier(sequence_output)
+        probs = torch.sigmoid(logits)
+        
+        if labels is not None:
+            loss_fct = torch.nn.BCELoss()
+            loss = loss_fct(probs, labels.float())
+            return loss, probs
+        return probs
+    
+    # Replace the model's forward method
+    model.forward = forward_with_sigmoid.__get__(model, model.__class__)
+    model.to(device)
 
+    print("Starting training and evaluation...")
+    print(f"Using device: {device}")
 
+    # Create datasets with task='1b'
+    dataset = PLABADataset(tokenizer, args.data_dir, task='1b')
+    
+    # Create data loaders
+    train_loader = DataLoader(dataset.train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(dataset.val_dataset, batch_size=args.batch_size)
+    test_loader = DataLoader(dataset.test_dataset, batch_size=args.batch_size)
+
+    # Modified training function for multi-label classification
+    def train_1b(model, train_loader, val_loader, device, args, save_path):
+        optimizer = AdamW(model.parameters(), lr=args.learning_rate)
+        best_f1 = 0
+        patience = 5
+        patience_counter = 0
+        max_epochs = args.num_epochs
+
+        for epoch in range(max_epochs):
+            model.train()
+            total_loss = 0
+
+            progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{max_epochs}')
+            for batch in progress_bar:
+                optimizer.zero_grad()
+                
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+                action_labels = batch['action_labels'].to(device)
+                
+                loss, _ = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=action_labels
+                )
+                
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+                
+                progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+
+            avg_loss = total_loss / len(train_loader)
+            print(f"\nEpoch {epoch+1}/{max_epochs}, Average Loss: {avg_loss:.4f}")
+
+            # Evaluate on validation set
+            model.eval()
+            all_predictions = []
+            all_labels = []
+            
+            val_progress = tqdm(val_loader, desc='Validating')
+            
+            with torch.no_grad():
+                for batch in val_progress:
+                    outputs = model(
+                        input_ids=batch['input_ids'].to(device),
+                        attention_mask=batch['attention_mask'].to(device)
+                    )
+                    predictions = (outputs > 0.5).float()
+                    
+                    # Get actual length of each sequence (ignore padding)
+                    mask = batch['attention_mask'].bool()
+                    
+                    # Collect predictions and labels for each sequence
+                    for pred_seq, label_seq, seq_mask in zip(predictions, batch['action_labels'], mask):
+                        length = seq_mask.sum().item()
+                        
+                        # Only keep predictions and labels for actual tokens (no padding)
+                        pred_seq = pred_seq[:length].cpu().numpy()
+                        label_seq = label_seq[:length].cpu().numpy()
+                        
+                        all_predictions.append(pred_seq)
+                        all_labels.append(label_seq)
+            
+            # Calculate metrics for multi-label classification
+            results = calculate_multi_label_metrics(all_predictions, all_labels)
+            
+            print(f"\nValidation Results:")
+            print(f"Overall F1: {results['f1']:.2f}")
+            print(f"Precision: {results['precision']:.2f}")
+            print(f"Recall: {results['recall']:.2f}")
+            
+            # Early stopping check
+            current_f1 = results['f1']
+            if current_f1 > best_f1:
+                best_f1 = current_f1
+                torch.save(model.state_dict(), save_path)
+                print(f"New best model saved with F1: {current_f1:.2f}")
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                    break
+        
+        return best_f1
+
+    def calculate_multi_label_metrics(predictions, labels):
+        """Calculate metrics for multi-label classification"""
+        # Initialize counters for overall metrics
+        tp = fp = fn = 0
+        
+        # Initialize counters for per-action metrics
+        action_metrics = {
+            'SUBSTITUTE': {'tp': 0, 'fp': 0, 'fn': 0},
+            'EXPLAIN': {'tp': 0, 'fp': 0, 'fn': 0},
+            'GENERALIZE': {'tp': 0, 'fp': 0, 'fn': 0},
+            'OMIT': {'tp': 0, 'fp': 0, 'fn': 0},
+            'EXEMPLIFY': {'tp': 0, 'fp': 0, 'fn': 0}
+        }
+        
+        for pred, label in zip(predictions, labels):
+            # For each label
+            for i, action in enumerate(['SUBSTITUTE', 'EXPLAIN', 'GENERALIZE', 'OMIT', 'EXEMPLIFY']):
+                pred_labels = pred[:, i]
+                true_labels = label[:, i]
+                
+                # Count for overall metrics
+                tp += ((pred_labels == 1) & (true_labels == 1)).sum()
+                fp += ((pred_labels == 1) & (true_labels == 0)).sum()
+                fn += ((pred_labels == 0) & (true_labels == 1)).sum()
+                
+                # Count for per-action metrics
+                action_metrics[action]['tp'] += ((pred_labels == 1) & (true_labels == 1)).sum()
+                action_metrics[action]['fp'] += ((pred_labels == 1) & (true_labels == 0)).sum()
+                action_metrics[action]['fn'] += ((pred_labels == 0) & (true_labels == 1)).sum()
+        
+        # Calculate overall metrics
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        # Calculate per-action metrics
+        results = {
+            'f1': f1 * 100,
+            'precision': precision * 100,
+            'recall': recall * 100
+        }
+        
+        # Add per-action metrics
+        for action, metrics in action_metrics.items():
+            action_precision = metrics['tp'] / (metrics['tp'] + metrics['fp']) if (metrics['tp'] + metrics['fp']) > 0 else 0
+            action_recall = metrics['tp'] / (metrics['tp'] + metrics['fn']) if (metrics['tp'] + metrics['fn']) > 0 else 0
+            action_f1 = 2 * action_precision * action_recall / (action_precision + action_recall) if (action_precision + action_recall) > 0 else 0
+            
+            results[action] = {
+                'f1': action_f1 * 100,
+                'precision': action_precision * 100,
+                'recall': action_recall * 100
+            }
+        
+        return results
+
+    def test_1b(model_path, test_loader, device, model):
+        # Load the saved state dict
+        model.load_state_dict(torch.load(model_path))
+        model.to(device)
+        model.eval()
+        
+        all_predictions = []
+        all_labels = []
+        
+        test_progress = tqdm(test_loader, desc='Testing')
+        
+        with torch.no_grad():
+            for batch in test_progress:
+                outputs = model(
+                    input_ids=batch['input_ids'].to(device),
+                    attention_mask=batch['attention_mask'].to(device)
+                )
+                predictions = (outputs > 0.5).float()
+                
+                # Get actual length of each sequence (ignore padding)
+                mask = batch['attention_mask'].bool()
+                
+                # Collect predictions and labels for each sequence
+                for pred_seq, label_seq, seq_mask in zip(predictions, batch['action_labels'], mask):
+                    length = seq_mask.sum().item()
+                    
+                    # Only keep predictions and labels for actual tokens (no padding)
+                    pred_seq = pred_seq[:length].cpu().numpy()
+                    label_seq = label_seq[:length].cpu().numpy()
+                    
+                    all_predictions.append(pred_seq)
+                    all_labels.append(label_seq)
+        
+        # Calculate metrics
+        results = calculate_multi_label_metrics(all_predictions, all_labels)
+        
+        return results
+
+    # Train the model
+    save_path = f'output/plaba/{args.model_name}_1b.pt'
+    train_1b(model, train_loader, val_loader, device, args, save_path)
+
+    # Test the best model
+    test_results = test_1b(save_path, test_loader, device, model)
+    print_results(test_results, '1b')
+    
+    return test_results
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
